@@ -1,14 +1,22 @@
 import pandas as pd
 import numpy as np
+#import datetime as dt
 from matplotlib import pyplot as plt
 from tqdm import tqdm
 
 
 # Creates initial ratings for all teams in dataframe of match results
 def create_team_elo(df):
-    teams = list(np.unique(df['winning_team_name']))
+    teams = list(np.unique(pd.concat([df['winning_team_name'], df['losing_team_name']])))
+    if '-' in teams:
+        teams.remove('-')
+    clean_teams = []
+    for team in teams:
+        clean_teams.append(team.replace('\xa0', '').strip())
+    clean_teams = teams = list(np.unique(clean_teams))
+
     elo = pd.DataFrame(columns=['team', 'rating'])
-    elo['team'] = teams
+    elo['team'] = clean_teams
     elo['rating'] = [1000.0] * len(teams)
     elo['matches'] = [0] * len(teams)
     return elo
@@ -23,45 +31,58 @@ def calc_team_elo(df, elo):
 
     for i in range(len(df)):
         row = df.iloc[i]
+        if row['result'] == 'y':
+            # Get pre-match Elo ratings
+            winning_team_index = team_indices[row['winning_team_name'].replace('\xa0', '').strip()]
+            losing_team_index = team_indices[row['losing_team_name'].replace('\xa0', '').strip()]
+            winning_team_prematch_elo = elo.at[winning_team_index, 'rating']
+            losing_team_prematch_elo = elo.at[losing_team_index, 'rating']
 
-        # Get pre-match Elo ratings
-        winning_team_index = team_indices[row['winning_team_name']]
-        losing_team_index = team_indices[row['losing_team_name']]
-        winning_team_prematch_elo = elo.at[winning_team_index, 'rating']
-        losing_team_prematch_elo = elo.at[losing_team_index, 'rating']
+            # Calculate pre-match Elo difference and win percentage
+            prematch_elo_difference = losing_team_prematch_elo - winning_team_prematch_elo
+            winning_team_win_percentage = round(1 / (1 + (10 ** (prematch_elo_difference / 400))), 2)
 
-        # Calculate pre-match Elo difference and win percentage
-        prematch_elo_difference = losing_team_prematch_elo - winning_team_prematch_elo
-        winning_team_win_percentage = round(1 / (1 + (10 ** (prematch_elo_difference / 400))), 2)
+            if 'NRR' in df.columns:
+                elo_change = round((25 + 25 * row['NRR']) * (1 - winning_team_win_percentage), 2)
+            elif row['win_type'] == 'runs':
+                elo_change = round((25 + 0.01 * row['winning_margin']) * (1 - winning_team_win_percentage), 2)
+            elif row['win_type'] == 'inns & runs':
+                elo_change = round((25 + 15 + 0.01 * row['winning_margin']) * (1 - winning_team_win_percentage), 2)
+            elif row['win_type'] == 'wickets':
+                elo_change = round((25 + 0.5 * row['winning_margin']) * (1 - winning_team_win_percentage), 2)
+            elif row['win_type'] == 'inns & wickets':
+                elo_change = round((25 + 15 + 0.5 * row['winning_margin']) * (1 - winning_team_win_percentage), 2)
+            elif row['win_type'] == 'draw':
+                elo_change = (0.5 - winning_team_win_percentage) * 50
+            else:
+                elo_change = round(50 * (1 - winning_team_win_percentage), 2)
 
-        # Calculate Elo change
-        elo_change = round((25 + 25 * row['NRR']) * (1 - winning_team_win_percentage), 2)
+            # Calculate post-match Elo ratings
+            winning_team_postmatch_elo = winning_team_prematch_elo + elo_change
+            losing_team_postmatch_elo = losing_team_prematch_elo - elo_change
 
-        # Calculate post-match Elo ratings
-        winning_team_postmatch_elo = winning_team_prematch_elo + elo_change
-        losing_team_postmatch_elo = losing_team_prematch_elo - elo_change
+            # Update dataframe with calculated values
+            df.at[i, 'winning_team_prematch_elo'] = winning_team_prematch_elo
+            df.at[i, 'losing_team_prematch_elo'] = losing_team_prematch_elo
+            df.at[i, 'prematch_elo_difference'] = prematch_elo_difference
+            df.at[i, 'winning_team_win_percentage'] = winning_team_win_percentage
+            df.at[i, 'elo_change'] = elo_change
+            df.at[i, 'winning_team_postmatch_elo'] = winning_team_postmatch_elo
+            df.at[i, 'losing_team_postmatch_elo'] = losing_team_postmatch_elo
 
-        # Update dataframe with calculated values
-        df.at[i, 'winning_team_prematch_elo'] = winning_team_prematch_elo
-        df.at[i, 'losing_team_prematch_elo'] = losing_team_prematch_elo
-        df.at[i, 'prematch_elo_difference'] = prematch_elo_difference
-        df.at[i, 'winning_team_win_percentage'] = winning_team_win_percentage
-        df.at[i, 'elo_change'] = elo_change
-        df.at[i, 'winning_team_postmatch_elo'] = winning_team_postmatch_elo
-        df.at[i, 'losing_team_postmatch_elo'] = losing_team_postmatch_elo
+            # Update Elo dataframes
+            elo.at[winning_team_index, 'rating'] = winning_team_postmatch_elo
+            elo.at[winning_team_index, 'matches'] += 1
+            elo.at[losing_team_index, 'rating'] = losing_team_postmatch_elo
+            elo.at[losing_team_index, 'matches'] += 1
 
-        # Update Elo dataframes
-        elo.at[winning_team_index, 'rating'] = winning_team_postmatch_elo
-        elo.at[winning_team_index, 'matches'] += 1
-        elo.at[losing_team_index, 'rating'] = losing_team_postmatch_elo
-        elo.at[losing_team_index, 'matches'] += 1
-
-        # Track team data for plotting
-        team_tracker.append({'team': row['winning_team_name'], 'rating': winning_team_postmatch_elo,
-                             'matches': elo.at[winning_team_index, 'matches']})
-        team_tracker.append({'team': row['losing_team_name'], 'rating': losing_team_postmatch_elo,
-                             'matches': elo.at[losing_team_index, 'matches']})
-
+            # Track team data for plotting
+            team_tracker.append({'team': row['winning_team_name'].replace('\xa0', '').strip(),
+                                 'rating': winning_team_postmatch_elo,
+                                 'matches': elo.at[winning_team_index, 'matches']})
+            team_tracker.append({'team': row['losing_team_name'].replace('\xa0', '').strip(),
+                                 'rating': losing_team_postmatch_elo,
+                                 'matches': elo.at[losing_team_index, 'matches']})
     # Create Elo tracker dataframe
     elo_tracker = pd.DataFrame(team_tracker)
 
@@ -126,7 +147,7 @@ def create_player_elo(df, role="bowler"):
     player_elo['deliveries'] = [0] * len(roles)
     player_elo_tracker = pd.DataFrame(columns=[role, 'rating'])
     player_elo_tracker[role] = roles
-    player_elo_tracker['rating'] = [1500.0] * len(roles)
+    player_elo_tracker['rating'] = [1000.0] * len(roles)
     player_elo_tracker['deliveries'] = [0] * len(roles)
     return player_elo
 
@@ -189,12 +210,13 @@ def import_statsguru_innings(filepath):
     # Process each match using vectorized operations
     for i, match in enumerate(matches):
         inn_rows = inn_df[inn_df['match_id'] == match]
+        df.at[i, 'match_id'] = match
         if 'won' in inn_rows['Result'].values:
             win_row = inn_rows[inn_rows['Result'] == 'won'].iloc[0]
             lose_row = inn_rows[inn_rows['Result'] == 'lost'].iloc[0]
-
+            df.at[i, 'result'] = 'y'
             # Populate the dataframe with match details
-            df.at[i, 'match_id'] = match
+
             df.at[i, 'start_date'] = pd.to_datetime(win_row['Start Date'])
             df.at[i, 'ground_loc'] = win_row['Ground']
             df.at[i, 'winning_team_name'] = win_row['Team']
@@ -210,6 +232,95 @@ def import_statsguru_innings(filepath):
                 (lose_row['Score'].split('/') if '/' in lose_row['Score'] else (lose_row['Score'], 10))
             df.at[i, 'losing_RR'] = lose_row['RPO']
             df.at[i, 'NRR'] = float(df.at[i, 'winning_RR']) - float(df.at[i, 'losing_RR'])
+        else:
+            win_row = inn_rows[inn_rows['match_id'] == match].iloc[0]
+            lose_row = inn_rows[inn_rows['match_id'] == match].iloc[1]
+            df.at[i, 'result'] = 'n'
+            # Populate the dataframe with match details
+            df.at[i, 'start_date'] = pd.to_datetime(win_row['Start Date'])
+            df.at[i, 'ground_loc'] = win_row['Ground']
+
+            df.at[i, 'winning_team_name'] = '-'
+            df.at[i, 'winning_innings_number'] = int()
+            df.at[i, 'winning_overs'] = int()
+            df.at[i, 'winning_runs'], df.at[i, 'winning_wickets'] = [int(), int()]
+            df.at[i, 'winning_RR'] = float()
+            df.at[i, 'losing_team_name'] = '-'
+            df.at[i, 'losing_innings_number'] = int()
+            df.at[i, 'losing_overs'] = int()
+            df.at[i, 'losing_runs'], df.at[i, 'losing_wickets'] = [int(), int()]
+            df.at[i, 'losing_RR'] = float()
+            df.at[i, 'NRR'] = float()
+
+    # Sort the dataframe by start_date and match_id
+    df.sort_values(by=['start_date', 'match_id'], ignore_index=True, inplace=True)
+
+    # Initialize additional columns for Elo ratings
+    df['winning_team_prematch_elo'] = pd.Series(index=df.index)
+    df['losing_team_prematch_elo'] = pd.Series(index=df.index)
+    df['prematch_elo_difference'] = pd.Series(index=df.index)
+    df['winning_team_win_percentage'] = pd.Series(index=df.index)
+    df['elo_change'] = pd.Series(index=df.index)
+    df['winning_team_postmatch_elo'] = pd.Series(index=df.index)
+    df['losing_team_postmatch_elo'] = pd.Series(index=df.index)
+
+    return df
+
+
+# converts innings-by-innings results into match level data for team elo ratings
+def import_statsguru_multiday_match(filepath):
+    # Read the CSV file
+    match_df = pd.read_csv(filepath)
+
+    # Create match_id column using vectorized operations
+    match_df['match_id'] = match_df.apply(
+        lambda row: ' vs '.join(sorted([row['Team'].replace('\xa0', '').strip(),
+                                        row['Opposition'].split('v')[1].replace('\xa0', '').strip()]))
+                    + ' - ' + row['Start Date'], axis=1)
+
+    # Initialize the dataframe with the required columns
+    df = pd.DataFrame(
+        columns=['match_id', 'start_date', 'ground_loc', 'result', 'winning_team_name', 'losing_team_name', 'win_type',
+                 'winning_margin'])
+
+    # Get unique match IDs
+    matches = match_df['match_id'].unique()
+
+    # Process each match using vectorized operations
+    for i, match in enumerate(matches):
+        match_row = match_df[match_df['match_id'] == match].iloc[0]
+        # print(match_row)
+        if 'won' in match_row['Result']:
+            df.at[i, 'result'] = 'y'
+            df.at[i, 'winning_team_name'] = match_row['Team']
+            df.at[i, 'losing_team_name'] = match_row['Opposition'].split('v')[1]
+            if 'inns' in match_row['Margin'].split(' '):
+                df.at[i, 'win_type'] = 'inns & ' + match_row['Margin'].split(' ')[3]
+                df.at[i, 'winning_margin'] = int(match_row['Margin'].split(' ')[2])
+            else:
+                df.at[i, 'win_type'] = match_row['Margin'].split(' ')[1]
+                df.at[i, 'winning_margin'] = int(match_row['Margin'].split(' ')[0])
+        elif 'lost' in match_row['Result']:
+            df.at[i, 'result'] = 'y'
+            df.at[i, 'losing_team_name'] = match_row['Team']
+            df.at[i, 'winning_team_name'] = match_row['Opposition'].split('v')[1]
+            if 'inns' in match_row['Margin'].split(' '):
+                df.at[i, 'win_type'] = 'inns & ' + match_row['Margin'].split(' ')[3]
+                df.at[i, 'winning_margin'] = int(match_row['Margin'].split(' ')[2])
+            else:
+                df.at[i, 'win_type'] = match_row['Margin'].split(' ')[1]
+                df.at[i, 'winning_margin'] = int(match_row['Margin'].split(' ')[0])
+        else:
+            df.at[i, 'result'] = 'n'
+            df.at[i, 'losing_team_name'] = '-'
+            df.at[i, 'winning_team_name'] = '-'
+            df.at[i, 'win_type'] = 'draw'
+            df.at[i, 'winning_margin'] = int()
+
+            # Populate the dataframe with match details
+        df.at[i, 'match_id'] = match
+        df.at[i, 'start_date'] = pd.to_datetime(match_row['Start Date'], dayfirst=True)
+        df.at[i, 'ground_loc'] = match_row['Ground']
 
     # Sort the dataframe by start_date and match_id
     df.sort_values(by=['start_date', 'match_id'], ignore_index=True, inplace=True)
@@ -270,7 +381,7 @@ def calc_player_elo(df, dls_df, bowler_elo, batter_elo, par_score=173.6):
         # Calculate expected runs and wicket value
         overs_rem = max_overs - row['over_no']
         expected_runs = round(((dls_values[str(curr_inn_wickets)][overs_rem] - dls_values[str(curr_inn_wickets)][
-            overs_rem - 1]) / 6) * (par_score/100), 1) if max_overs <= 50 else 0.4
+            overs_rem - 1]) / 6) * (par_score / 100), 1) if max_overs <= 50 else 0.4
         wicket_value = round((dls_values[str(curr_inn_wickets)][overs_rem] - dls_values[str(curr_inn_wickets + 1)][
             overs_rem]) * (par_score / 100), 1)
 
